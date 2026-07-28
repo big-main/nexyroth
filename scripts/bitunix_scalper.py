@@ -1,16 +1,28 @@
 #!/usr/bin/env python3
 """
-NEXYROTH Bitunix Zero-Fee Scalper v1.0
+NEXYROTH × AlgoPro Hybrid Scalper v2.0
 =======================================
-EMA 9/21 crossover + RSI(14) filter on 1-minute candles.
-Only trades the 10 zero-fee tokens on Bitunix.
+Full confluence strategy running natively on cloud computer.
+No TradingView needed — all indicators computed locally.
 
-Strategy:
-  - EMA9 crosses above EMA21 + RSI > 50  → LONG
-  - EMA9 crosses below EMA21 + RSI < 50  → SHORT
-  - TP: +0.3%, SL: -0.2% (tight scalp)
-  - Max 1 position at a time
-  - Runs every 5 minutes via cron
+Strategy Filters (ALL must agree for entry):
+  1. EMA 9/21 crossover (primary signal)
+  2. 200 EMA trend filter (only LONG above, SHORT below)
+  3. MACD histogram confirmation (positive for LONG, negative for SHORT)
+  4. Volume filter (1.2x above 20-bar average)
+  5. RSI filter (>45 for LONG, <55 for SHORT)
+
+Risk Management:
+  - Rolling Kelly Criterion position sizing (adapts to win rate)
+  - Chandelier trailing stop (ATR-based, locks profits)
+  - ATR emergency stop (hard stop if trail fails)
+  - TP at 3:1 risk-reward ratio
+
+Execution:
+  - Runs every 1 minute via cron
+  - Only trades 10 zero-fee tokens on Bitunix
+  - Max 2 concurrent positions
+  - Auto-manages trailing stops on existing positions
 
 Auth: Double-SHA256 (same as auto-executor)
 """
@@ -21,8 +33,9 @@ import time
 import uuid
 import hashlib
 import requests
+import math
 from datetime import datetime, timezone
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 
 # ═══════════════════════════════════════════════════════════════
 # CONFIGURATION
@@ -41,31 +54,76 @@ def _read_secret(env_var: str, path: str) -> str:
 
 API_KEY    = _read_secret("BITUNIX_API_KEY",    os.path.expanduser("~/.secrets/bitunix_api_key"))
 SECRET_KEY = _read_secret("BITUNIX_SECRET_KEY", os.path.expanduser("~/.secrets/bitunix_secret_key"))
-RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-ALERT_EMAIL    = os.getenv("ALERT_EMAIL_TO", "")
+RESEND_API_KEY = _read_secret("RESEND_API_KEY", os.path.expanduser("~/.secrets/resend_api_key"))
+ALERT_EMAIL    = os.getenv("ALERT_EMAIL_TO", "big.main@protonmail.com")
 
 LOG_FILE   = "/home/ubuntu/trading_sniper/bitunix_scalper.log"
 STATE_FILE = "/home/ubuntu/trading_sniper/data/scalper_state.json"
+HISTORY_FILE = "/home/ubuntu/trading_sniper/data/scalper_history.json"
 
-# Strategy parameters — MAXIMUM AGGRESSION MODE (updated 2026-07-25)
-TP_PCT          = 0.003   # +0.3% take profit
-SL_PCT          = 0.002   # -0.2% stop loss
-LEVERAGE        = 10      # 10x leverage for scalping
-RISK_PCT        = 0.45    # 45% of balance per trade
-MIN_BALANCE     = 3.0     # Don't trade below $3
-EMA_FAST        = 9       # Fast EMA period
-EMA_SLOW        = 21      # Slow EMA period
-RSI_PERIOD      = 14      # RSI period
-RSI_LONG_MIN    = 45      # RSI must be above this for LONG
-RSI_SHORT_MAX   = 55      # RSI must be below this for SHORT
-MIN_CANDLES     = 30      # Minimum candles needed for reliable signals
-CANDLE_INTERVAL = "1m"    # 1-minute candles
+# ─── Strategy Parameters ───────────────────────────────────────
+# EMA Crossover
+EMA_FAST        = 9
+EMA_SLOW        = 21
+EMA_TREND       = 200    # Trend filter
+
+# MACD
+MACD_FAST       = 12
+MACD_SLOW       = 26
+MACD_SIGNAL     = 9
+
+# RSI
+RSI_PERIOD      = 14
+RSI_LONG_MIN    = 45
+RSI_SHORT_MAX   = 55
+
+# Volume
+VOL_MULT        = 1.2    # Volume must be 1.2x above 20-bar avg
+VOL_LOOKBACK    = 20
+
+# ATR / Chandelier
+ATR_PERIOD      = 14
+CHANDELIER_MULT = 2.5    # Chandelier trailing stop multiplier
+ATR_EMERGENCY   = 1.5    # Emergency hard stop multiplier
+
+# Risk Management
+LEVERAGE        = 10
+MIN_BALANCE     = 2.0
+MAX_POSITIONS   = 2
+TP_RR_RATIO     = 3.0    # Take profit at 3:1 risk-reward
+FALLBACK_RISK   = 0.02   # 2% risk before Kelly activates
+MAX_RISK_CAP    = 0.05   # 5% max risk per trade (Kelly cap)
+MIN_KELLY_TRADES = 10    # Min trades before Kelly activates
+
+# Candle settings
+CANDLE_INTERVAL = "1m"
+CANDLE_LIMIT    = 250    # Need 200+ for EMA200
 
 # Zero-fee token allowlist
 ZERO_FEE_SYMBOLS = [
     "SOLUSDT", "XRPUSDT", "SUIUSDT", "LABUSDT", "BUSDT",
     "TONUSDT", "SKYAIUSDT", "DOGSUSDT", "DOGEUSDT", "TSTUSDT",
 ]
+
+# Per-symbol minimum qty (from Bitunix error messages)
+MIN_QTY_MAP = {
+    "SOLUSDT": 0.1, "XRPUSDT": 5, "SUIUSDT": 10, "LABUSDT": 10,
+    "BUSDT": 20, "TONUSDT": 1, "SKYAIUSDT": 10, "DOGSUSDT": 100000,
+    "DOGEUSDT": 10, "TSTUSDT": 10,
+}
+
+# Per-symbol price precision
+PRICE_PRECISION = {
+    "SOLUSDT": 2, "XRPUSDT": 4, "SUIUSDT": 4, "LABUSDT": 4,
+    "BUSDT": 4, "TONUSDT": 4, "SKYAIUSDT": 5, "DOGSUSDT": 8,
+    "DOGEUSDT": 5, "TSTUSDT": 5,
+}
+
+QTY_PRECISION = {
+    "SOLUSDT": 2, "XRPUSDT": 1, "SUIUSDT": 1, "LABUSDT": 1,
+    "BUSDT": 1, "TONUSDT": 2, "SKYAIUSDT": 1, "DOGSUSDT": 0,
+    "DOGEUSDT": 1, "TSTUSDT": 1,
+}
 
 # ═══════════════════════════════════════════════════════════════
 # LOGGING
@@ -82,15 +140,12 @@ def log(msg: str):
         pass
 
 # ═══════════════════════════════════════════════════════════════
-# AUTH — matches bitunix_auto_executor.py signing logic exactly
+# AUTH — Double-SHA256
 # ═══════════════════════════════════════════════════════════════
 def sha256_hex(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
 def make_sign(nonce: str, timestamp: str, query_params: str = "", body: str = "") -> str:
-    """
-    sign = SHA256( SHA256(nonce + timestamp + api-key + queryParams + body) + secretKey )
-    """
     digest = sha256_hex(nonce + timestamp + API_KEY + query_params + body)
     return sha256_hex(digest + SECRET_KEY)
 
@@ -123,7 +178,6 @@ def bitunix_get(path: str, params: dict = None) -> Optional[dict]:
         r = requests.get(url, headers=headers, timeout=15)
         data = r.json()
         if data.get("code") != 0:
-            log(f"  API error [{path}]: {data.get('msg', data)}")
             return None
         return data.get("data")
     except Exception as e:
@@ -153,8 +207,8 @@ def get_balance() -> float:
         return 0.0
     return float(data.get("available", 0) or 0)
 
-def get_klines(symbol: str, interval: str = "1m", limit: int = 50) -> List[dict]:
-    """Fetch OHLCV candles. Returns list of {open, high, low, close, volume}."""
+def get_klines(symbol: str, interval: str = "1m", limit: int = 250) -> List[dict]:
+    """Fetch OHLCV candles."""
     try:
         r = requests.get(
             f"{BITUNIX_API}/api/v1/futures/market/kline",
@@ -168,7 +222,6 @@ def get_klines(symbol: str, interval: str = "1m", limit: int = 50) -> List[dict]
         candles = []
         for c in data:
             try:
-                # API returns dicts: {open, high, low, close, quoteVol, baseVol, time}
                 if isinstance(c, dict):
                     candles.append({
                         "open":   float(c.get("open", 0)),
@@ -193,7 +246,7 @@ def get_klines(symbol: str, interval: str = "1m", limit: int = 50) -> List[dict]
         return []
 
 def get_ticker_price(symbol: str) -> float:
-    """Get current last price for a symbol using the tickers endpoint."""
+    """Get current last price."""
     try:
         r = requests.get(
             f"{BITUNIX_API}/api/v1/futures/market/tickers",
@@ -204,12 +257,10 @@ def get_ticker_price(symbol: str) -> float:
         if resp.get("code") != 0:
             return 0.0
         data = resp.get("data", [])
-        # Returns a list; find the matching symbol
         if isinstance(data, list):
             for item in data:
                 if item.get("symbol") == symbol:
                     return float(item.get("last", item.get("lastPrice", 0)) or 0)
-            # If symbol filter didn't work, return first item
             if data:
                 return float(data[0].get("last", data[0].get("lastPrice", 0)) or 0)
         elif isinstance(data, dict):
@@ -226,27 +277,11 @@ def get_open_positions() -> List[dict]:
     positions = data if isinstance(data, list) else data.get("positionList", [])
     return [p for p in positions if float(p.get("qty", 0) or 0) > 0]
 
-def get_min_qty(symbol: str) -> float:
-    """Get minimum order quantity for a symbol."""
-    try:
-        r = requests.get(
-            f"{BITUNIX_API}/api/v1/futures/market/detail",
-            params={"symbol": symbol},
-            timeout=8
-        )
-        resp = r.json()
-        if resp.get("code") != 0:
-            return 1.0
-        data = resp.get("data", {})
-        return float(data.get("minQty", 1) or 1)
-    except:
-        return 1.0
-
 # ═══════════════════════════════════════════════════════════════
 # TECHNICAL INDICATORS
 # ═══════════════════════════════════════════════════════════════
-def ema(values: List[float], period: int) -> List[float]:
-    """Exponential Moving Average."""
+def calc_ema(values: List[float], period: int) -> List[float]:
+    """Exponential Moving Average — returns full-length list."""
     if len(values) < period:
         return []
     k = 2.0 / (period + 1)
@@ -255,8 +290,8 @@ def ema(values: List[float], period: int) -> List[float]:
         result.append(v * k + result[-1] * (1 - k))
     return result
 
-def rsi(closes: List[float], period: int = 14) -> float:
-    """Relative Strength Index (last value)."""
+def calc_rsi(closes: List[float], period: int = 14) -> float:
+    """RSI (last value)."""
     if len(closes) < period + 1:
         return 50.0
     gains, losses = [], []
@@ -264,7 +299,6 @@ def rsi(closes: List[float], period: int = 14) -> float:
         delta = closes[i] - closes[i - 1]
         gains.append(max(delta, 0))
         losses.append(max(-delta, 0))
-    # Initial averages
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
     for i in range(period, len(gains)):
@@ -275,44 +309,370 @@ def rsi(closes: List[float], period: int = 14) -> float:
     rs = avg_gain / avg_loss
     return 100.0 - (100.0 / (1 + rs))
 
-def get_signal(symbol: str) -> Optional[str]:
+def calc_macd(closes: List[float]) -> Tuple[float, float, float]:
+    """MACD line, signal line, histogram (last values)."""
+    ema12 = calc_ema(closes, MACD_FAST)
+    ema26 = calc_ema(closes, MACD_SLOW)
+    if not ema12 or not ema26:
+        return 0, 0, 0
+    # Align
+    min_len = min(len(ema12), len(ema26))
+    macd_line = [ema12[-(min_len - i)] - ema26[-(min_len - i)] for i in range(min_len)]
+    if len(macd_line) < MACD_SIGNAL:
+        return macd_line[-1] if macd_line else 0, 0, 0
+    signal = calc_ema(macd_line, MACD_SIGNAL)
+    if not signal:
+        return macd_line[-1], 0, macd_line[-1]
+    hist = macd_line[-1] - signal[-1]
+    return macd_line[-1], signal[-1], hist
+
+def calc_atr(candles: List[dict], period: int = 14) -> float:
+    """Average True Range (last value)."""
+    if len(candles) < period + 1:
+        return 0.0
+    trs = []
+    for i in range(1, len(candles)):
+        high = candles[i]["high"]
+        low = candles[i]["low"]
+        prev_close = candles[i-1]["close"]
+        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
+        trs.append(tr)
+    if len(trs) < period:
+        return sum(trs) / len(trs) if trs else 0
+    # Wilder's smoothing
+    atr = sum(trs[:period]) / period
+    for tr in trs[period:]:
+        atr = (atr * (period - 1) + tr) / period
+    return atr
+
+def calc_volume_ratio(candles: List[dict], lookback: int = 20) -> float:
+    """Current volume / average volume over lookback."""
+    if len(candles) < lookback + 1:
+        return 0.0
+    volumes = [c["volume"] for c in candles]
+    avg_vol = sum(volumes[-(lookback+1):-1]) / lookback
+    if avg_vol == 0:
+        return 0.0
+    return volumes[-1] / avg_vol
+
+# ═══════════════════════════════════════════════════════════════
+# SIGNAL GENERATION — Full Confluence
+# ═══════════════════════════════════════════════════════════════
+def get_signal(symbol: str) -> Optional[Dict]:
     """
-    Returns 'LONG', 'SHORT', or None based on EMA crossover + RSI.
+    Returns signal dict with direction, ATR, entry price, or None.
+    ALL 5 filters must agree for a signal.
     """
-    candles = get_klines(symbol, CANDLE_INTERVAL, limit=60)
-    if len(candles) < MIN_CANDLES:
-        log(f"  {symbol}: insufficient candles ({len(candles)})")
+    candles = get_klines(symbol, CANDLE_INTERVAL, CANDLE_LIMIT)
+    if len(candles) < EMA_TREND + 5:
         return None
 
     closes = [c["close"] for c in candles]
-    ema_fast = ema(closes, EMA_FAST)
-    ema_slow = ema(closes, EMA_SLOW)
+    current_price = closes[-1]
 
+    # ─── Filter 1: EMA 9/21 Crossover ───────────────────────────
+    ema_fast = calc_ema(closes, EMA_FAST)
+    ema_slow = calc_ema(closes, EMA_SLOW)
     if len(ema_fast) < 2 or len(ema_slow) < 2:
         return None
 
-    # Align lengths
     min_len = min(len(ema_fast), len(ema_slow))
     ef = ema_fast[-min_len:]
     es = ema_slow[-min_len:]
 
-    # Previous and current crossover state
     prev_above = ef[-2] > es[-2]
     curr_above = ef[-1] > es[-1]
 
-    current_rsi = rsi(closes, RSI_PERIOD)
+    # Must be an actual crossover (state change)
+    if prev_above == curr_above:
+        return None  # No crossover happening
 
-    # Bullish crossover: EMA9 crosses above EMA21
-    if not prev_above and curr_above and current_rsi > RSI_LONG_MIN:
-        log(f"  {symbol}: LONG signal | EMA9={ef[-1]:.6f} > EMA21={es[-1]:.6f} | RSI={current_rsi:.1f}")
-        return "LONG"
+    direction = "LONG" if (not prev_above and curr_above) else "SHORT"
 
-    # Bearish crossover: EMA9 crosses below EMA21
-    if prev_above and not curr_above and current_rsi < RSI_SHORT_MAX:
-        log(f"  {symbol}: SHORT signal | EMA9={ef[-1]:.6f} < EMA21={es[-1]:.6f} | RSI={current_rsi:.1f}")
-        return "SHORT"
+    # ─── Filter 2: 200 EMA Trend ────────────────────────────────
+    ema200 = calc_ema(closes, EMA_TREND)
+    if not ema200:
+        return None
+    trend_ema = ema200[-1]
 
+    if direction == "LONG" and current_price < trend_ema:
+        return None  # Don't LONG below 200 EMA
+    if direction == "SHORT" and current_price > trend_ema:
+        return None  # Don't SHORT above 200 EMA
+
+    # ─── Filter 3: MACD Histogram Confirmation ──────────────────
+    macd_line, signal_line, histogram = calc_macd(closes)
+    if direction == "LONG" and histogram <= 0:
+        return None  # MACD must be positive for LONG
+    if direction == "SHORT" and histogram >= 0:
+        return None  # MACD must be negative for SHORT
+
+    # ─── Filter 4: Volume Confirmation ──────────────────────────
+    vol_ratio = calc_volume_ratio(candles, VOL_LOOKBACK)
+    if vol_ratio < VOL_MULT:
+        return None  # Volume too low
+
+    # ─── Filter 5: RSI Confirmation ─────────────────────────────
+    current_rsi = calc_rsi(closes, RSI_PERIOD)
+    if direction == "LONG" and current_rsi < RSI_LONG_MIN:
+        return None
+    if direction == "SHORT" and current_rsi > RSI_SHORT_MAX:
+        return None
+
+    # ─── All 5 filters passed! ──────────────────────────────────
+    atr = calc_atr(candles, ATR_PERIOD)
+
+    log(f"  ✅ {symbol}: {direction} SIGNAL CONFIRMED")
+    log(f"     EMA9={ef[-1]:.6f} {'>' if direction=='LONG' else '<'} EMA21={es[-1]:.6f}")
+    log(f"     Price {'>' if direction=='LONG' else '<'} EMA200={trend_ema:.6f}")
+    log(f"     MACD hist={histogram:.8f} | RSI={current_rsi:.1f} | Vol={vol_ratio:.2f}x")
+    log(f"     ATR={atr:.8f}")
+
+    return {
+        "direction": direction,
+        "price": current_price,
+        "atr": atr,
+        "rsi": current_rsi,
+        "macd_hist": histogram,
+        "vol_ratio": vol_ratio,
+    }
+
+# ═══════════════════════════════════════════════════════════════
+# ROLLING KELLY CRITERION
+# ═══════════════════════════════════════════════════════════════
+def load_trade_history() -> List[dict]:
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE) as f:
+                return json.load(f)
+        except:
+            pass
+    return []
+
+def save_trade_history(history: List[dict]):
+    os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(history[-100:], f, indent=2)  # Keep last 100 trades
+
+def calc_kelly_fraction(history: List[dict]) -> float:
+    """Calculate Kelly fraction from trade history."""
+    if len(history) < MIN_KELLY_TRADES:
+        return FALLBACK_RISK
+
+    # Use last 50 trades for rolling window
+    recent = history[-50:]
+    wins = [t for t in recent if t.get("pnl", 0) > 0]
+    losses = [t for t in recent if t.get("pnl", 0) < 0]
+
+    if not wins or not losses:
+        return FALLBACK_RISK
+
+    win_rate = len(wins) / len(recent)
+    avg_win = sum(t["pnl"] for t in wins) / len(wins)
+    avg_loss = abs(sum(t["pnl"] for t in losses) / len(losses))
+
+    if avg_loss == 0:
+        return MAX_RISK_CAP
+
+    # Kelly = W - (1-W)/R where R = avg_win/avg_loss
+    rr = avg_win / avg_loss
+    kelly = win_rate - (1 - win_rate) / rr
+
+    # Half-Kelly for safety, capped
+    half_kelly = kelly / 2.0
+    return max(FALLBACK_RISK, min(half_kelly, MAX_RISK_CAP))
+
+# ═══════════════════════════════════════════════════════════════
+# CHANDELIER TRAILING STOP
+# ═══════════════════════════════════════════════════════════════
+def calc_chandelier_stop(candles: List[dict], direction: str, atr: float) -> float:
+    """Calculate Chandelier trailing stop level."""
+    if direction == "LONG":
+        # Highest high in recent candles minus ATR * mult
+        recent_highs = [c["high"] for c in candles[-ATR_PERIOD:]]
+        highest = max(recent_highs) if recent_highs else candles[-1]["close"]
+        return highest - (atr * CHANDELIER_MULT)
+    else:
+        # Lowest low in recent candles plus ATR * mult
+        recent_lows = [c["low"] for c in candles[-ATR_PERIOD:]]
+        lowest = min(recent_lows) if recent_lows else candles[-1]["close"]
+        return lowest + (atr * CHANDELIER_MULT)
+
+# ═══════════════════════════════════════════════════════════════
+# TRADE EXECUTION
+# ═══════════════════════════════════════════════════════════════
+def place_trade(symbol: str, direction: str, price: float, atr: float, balance: float) -> Optional[dict]:
+    """Place a trade with Kelly sizing and ATR-based TP/SL."""
+    # Kelly position sizing
+    history = load_trade_history()
+    risk_frac = calc_kelly_fraction(history)
+    risk_usdt = balance * risk_frac
+    position_val = risk_usdt * LEVERAGE
+
+    qty = position_val / price
+    min_qty = MIN_QTY_MAP.get(symbol, 1.0)
+    qty_prec = QTY_PRECISION.get(symbol, 2)
+    price_prec = PRICE_PRECISION.get(symbol, 4)
+
+    # Bump up to minimum if close
+    if qty < min_qty:
+        needed_balance = (min_qty * price) / LEVERAGE / risk_frac
+        if needed_balance < balance * 2:  # Within 2x intended risk
+            qty = min_qty
+        else:
+            log(f"  ⚠️ {symbol}: qty {qty:.4f} < min {min_qty} — skipping")
+            return None
+
+    qty = round(qty, qty_prec)
+    if qty_prec == 0:
+        qty = int(qty)
+
+    # ATR-based stops
+    sl_distance = atr * ATR_EMERGENCY
+    tp_distance = sl_distance * TP_RR_RATIO
+
+    if direction == "LONG":
+        side     = "BUY"
+        tp_price = round(price + tp_distance, price_prec)
+        sl_price = round(price - sl_distance, price_prec)
+    else:
+        side     = "SELL"
+        tp_price = round(price - tp_distance, price_prec)
+        sl_price = round(price + sl_distance, price_prec)
+
+    order_body = {
+        "symbol":      symbol,
+        "side":        side,
+        "tradeSide":   "OPEN",
+        "orderType":   "MARKET",
+        "qty":         str(qty),
+        "leverage":    str(LEVERAGE),
+        "positionType": 1,
+        "tpPrice":     str(tp_price),
+        "slPrice":     str(sl_price),
+    }
+
+    log(f"  📤 PLACING {direction} {symbol}: qty={qty} @ ~{price} | TP={tp_price} SL={sl_price} | Kelly={risk_frac:.3f}")
+    result = bitunix_post("/api/v1/futures/trade/place_order", order_body)
+
+    if result:
+        order_id = result.get("orderId", "unknown")
+        log(f"  ✅ ORDER FILLED: {order_id}")
+        send_alert(f"🎯 SCALPER {direction} {symbol}\nQty: {qty}\nEntry: ~{price}\nTP: {tp_price}\nSL: {sl_price}\nKelly: {risk_frac:.3f}\nOrder: {order_id}")
+        return {
+            "symbol": symbol,
+            "direction": direction,
+            "entry_price": price,
+            "qty": qty,
+            "tp": tp_price,
+            "sl": sl_price,
+            "atr": atr,
+            "order_id": order_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
     return None
+
+# ═══════════════════════════════════════════════════════════════
+# TRAILING STOP MANAGEMENT
+# ═══════════════════════════════════════════════════════════════
+def manage_trailing_stops(state: dict):
+    """Check and update trailing stops on active positions."""
+    active = state.get("active_positions", [])
+    if not active:
+        return
+
+    for pos in active[:]:
+        symbol = pos["symbol"]
+        direction = pos["direction"]
+        entry = pos["entry_price"]
+
+        candles = get_klines(symbol, CANDLE_INTERVAL, 50)
+        if len(candles) < ATR_PERIOD + 1:
+            continue
+
+        current_price = candles[-1]["close"]
+        atr = calc_atr(candles, ATR_PERIOD)
+        chandelier = calc_chandelier_stop(candles, direction, atr)
+
+        # Check if Chandelier stop is hit
+        if direction == "LONG" and current_price < chandelier:
+            log(f"  🔔 {symbol} LONG: Chandelier stop hit @ {current_price:.6f} (stop={chandelier:.6f})")
+            close_position(symbol, direction, current_price, pos, state)
+        elif direction == "SHORT" and current_price > chandelier:
+            log(f"  🔔 {symbol} SHORT: Chandelier stop hit @ {current_price:.6f} (stop={chandelier:.6f})")
+            close_position(symbol, direction, current_price, pos, state)
+        else:
+            # Update trailing stop in state
+            pos["chandelier_stop"] = chandelier
+            log(f"  📊 {symbol} {direction}: price={current_price:.6f} | trail={chandelier:.6f} | ATR={atr:.8f}")
+
+def close_position(symbol: str, direction: str, exit_price: float, pos: dict, state: dict):
+    """Close a position via market order."""
+    qty = pos["qty"]
+    close_side = "SELL" if direction == "LONG" else "BUY"
+
+    order_body = {
+        "symbol": symbol,
+        "side": close_side,
+        "tradeSide": "CLOSE",
+        "orderType": "MARKET",
+        "qty": str(qty),
+        "positionType": 1,
+    }
+
+    result = bitunix_post("/api/v1/futures/trade/place_order", order_body)
+    entry = pos["entry_price"]
+
+    if direction == "LONG":
+        pnl_pct = (exit_price - entry) / entry
+    else:
+        pnl_pct = (entry - exit_price) / entry
+
+    pnl_usdt = pnl_pct * float(qty) * entry * LEVERAGE / LEVERAGE  # Simplified
+
+    log(f"  💰 CLOSED {symbol} {direction}: entry={entry} exit={exit_price} PnL={pnl_pct*100:.2f}%")
+
+    # Record in history
+    history = load_trade_history()
+    history.append({
+        "symbol": symbol,
+        "direction": direction,
+        "entry": entry,
+        "exit": exit_price,
+        "pnl": pnl_pct,
+        "pnl_usdt": pnl_usdt,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    save_trade_history(history)
+
+    # Remove from active
+    if pos in state.get("active_positions", []):
+        state["active_positions"].remove(pos)
+    state["total_trades"] = state.get("total_trades", 0) + 1
+    state["total_pnl"] = state.get("total_pnl", 0) + pnl_pct
+
+    send_alert(f"💰 SCALPER CLOSED {symbol} {direction}\nEntry: {entry}\nExit: {exit_price}\nPnL: {pnl_pct*100:.2f}%")
+
+# ═══════════════════════════════════════════════════════════════
+# EMAIL ALERTS
+# ═══════════════════════════════════════════════════════════════
+def send_alert(msg: str):
+    if not RESEND_API_KEY:
+        return
+    try:
+        requests.post(
+            "https://api.resend.com/emails",
+            headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "from": "NEXYROTH Scalper <alerts@nexyroth.com>",
+                "to": [ALERT_EMAIL],
+                "subject": f"⚡ Scalper: {msg[:50]}",
+                "text": msg,
+            },
+            timeout=10,
+        )
+    except:
+        pass
 
 # ═══════════════════════════════════════════════════════════════
 # STATE MANAGEMENT
@@ -325,7 +685,7 @@ def load_state() -> dict:
                 return json.load(f)
         except:
             pass
-    return {"active_position": None, "total_trades": 0, "total_pnl": 0.0}
+    return {"active_positions": [], "total_trades": 0, "total_pnl": 0.0}
 
 def save_state(state: dict):
     os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
@@ -333,172 +693,73 @@ def save_state(state: dict):
         json.dump(state, f, indent=2)
 
 # ═══════════════════════════════════════════════════════════════
-# TRADE EXECUTION
-# ═══════════════════════════════════════════════════════════════
-def place_scalp_trade(symbol: str, direction: str, price: float, balance: float) -> Optional[dict]:
-    """Place a scalp trade with tight TP/SL."""
-    risk_usdt = balance * RISK_PCT
-    position_val = risk_usdt * LEVERAGE
-    qty = position_val / price
-
-    min_qty = get_min_qty(symbol)
-    if qty < min_qty:
-        log(f"  ⚠️ {symbol}: qty {qty:.6f} < min {min_qty} — skipping")
-        return None
-
-    qty = round(qty, 3)
-
-    if direction == "LONG":
-        side     = "BUY"
-        tp_price = round(price * (1 + TP_PCT), 6)
-        sl_price = round(price * (1 - SL_PCT), 6)
-    else:
-        side     = "SELL"
-        tp_price = round(price * (1 - TP_PCT), 6)
-        sl_price = round(price * (1 + SL_PCT), 6)
-
-    order_body = {
-        "symbol":      symbol,
-        "side":        side,
-        "tradeSide":   "OPEN",
-        "orderType":   "MARKET",
-        "qty":         str(qty),
-        "tpPrice":     str(tp_price),
-        "tpStopType":  "MARK_PRICE",
-        "tpOrderType": "MARKET",
-        "slPrice":     str(sl_price),
-        "slStopType":  "MARK_PRICE",
-        "slOrderType": "MARKET",
-        "clientId":    f"nexyroth_scalp_{uuid.uuid4().hex[:12]}",
-    }
-
-    log(f"  📤 Scalp {direction} {symbol} | qty={qty} | price=${price:.6f} | TP=${tp_price:.6f} | SL=${sl_price:.6f}")
-    result = bitunix_post("/api/v1/futures/trade/place_order", order_body)
-
-    if result:
-        order_id = result.get("orderId", "?")
-        log(f"  ✅ Scalp order placed: {order_id}")
-        return {
-            "orderId":    order_id,
-            "symbol":     symbol,
-            "direction":  direction,
-            "qty":        qty,
-            "entryPrice": price,
-            "tpPrice":    tp_price,
-            "slPrice":    sl_price,
-            "openTime":   datetime.now(timezone.utc).isoformat(),
-        }
-    return None
-
-def check_position_closed(state: dict) -> bool:
-    """Check if the active position has been closed (hit TP or SL)."""
-    pos = state.get("active_position")
-    if not pos:
-        return True
-
-    symbol = pos["symbol"]
-    open_positions = get_open_positions()
-    open_symbols = {p.get("symbol") for p in open_positions}
-
-    if symbol not in open_symbols:
-        log(f"  ✅ Position {symbol} closed (TP/SL hit or manual close)")
-        return True
-    return False
-
-def send_scalp_alert(trade: dict, balance: float):
-    """Send email alert for scalp trade."""
-    direction = trade["direction"]
-    symbol    = trade["symbol"]
-    emoji     = "🟢" if direction == "LONG" else "🔴"
-    subject   = f"{emoji} NEXYROTH Scalp {direction}: {symbol}"
-    html = f"""
-    <div style="font-family:monospace;background:#0a0a0a;color:#e0e0e0;padding:20px;border-radius:12px;max-width:480px">
-        <h2 style="color:#00d4ff;margin:0 0 16px">{emoji} SCALP {direction}: {symbol}</h2>
-        <p style="color:#aaa;margin:4px 0">Entry: <b style="color:#fff">${trade['entryPrice']:.6f}</b></p>
-        <p style="color:#aaa;margin:4px 0">TP: <b style="color:#00ff88">${trade['tpPrice']:.6f}</b> (+{TP_PCT*100:.1f}%)</p>
-        <p style="color:#aaa;margin:4px 0">SL: <b style="color:#ff4444">${trade['slPrice']:.6f}</b> (-{SL_PCT*100:.1f}%)</p>
-        <p style="color:#aaa;margin:4px 0">Qty: <b style="color:#fff">{trade['qty']}</b></p>
-        <p style="color:#aaa;margin:4px 0">Balance: <b style="color:#fff">${balance:.2f} USDT</b></p>
-        <p style="color:#555;font-size:10px;margin-top:12px">NEXYROTH Scalper v1.0 | EMA9/21 + RSI14</p>
-    </div>
-    """
-    try:
-        requests.post(
-            "https://api.resend.com/emails",
-            headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
-            json={"from": "onboarding@resend.dev", "to": ALERT_EMAIL, "subject": subject, "html": html},
-            timeout=10
-        )
-        log("  📧 Scalp alert sent.")
-    except Exception as e:
-        log(f"  ⚠️ Email error: {e}")
-
-# ═══════════════════════════════════════════════════════════════
-# MAIN LOOP
+# MAIN EXECUTION
 # ═══════════════════════════════════════════════════════════════
 def main():
     log("=" * 60)
-    log("NEXYROTH Bitunix Zero-Fee Scalper v1.0")
+    log("NEXYROTH × AlgoPro Hybrid Scalper v2.0 — Scan Start")
     log("=" * 60)
 
     if not API_KEY or not SECRET_KEY:
-        log("  ❌ No API keys — exiting")
+        log("❌ Missing Bitunix API credentials")
         return
 
     # Load state
     state = load_state()
+    active = state.get("active_positions", [])
 
     # Check balance
     balance = get_balance()
-    log(f"  Balance: ${balance:.2f} USDT")
+    log(f"  Balance: ${balance:.2f} | Active positions: {len(active)}/{MAX_POSITIONS}")
 
     if balance < MIN_BALANCE:
-        log(f"  ⚠️ Balance ${balance:.2f} below minimum ${MIN_BALANCE} — pausing")
+        log(f"  ⚠️ Balance ${balance:.2f} < ${MIN_BALANCE} minimum — skipping")
+        save_state(state)
         return
 
-    # Check if active position is still open
-    if state.get("active_position"):
-        if check_position_closed(state):
-            state["active_position"] = None
-            state["total_trades"] = state.get("total_trades", 0) + 1
-            save_state(state)
-        else:
-            log(f"  📊 Active position: {state['active_position']['symbol']} {state['active_position']['direction']} — waiting for TP/SL")
-            return
+    # Step 1: Manage trailing stops on existing positions
+    if active:
+        log("─── Managing Trailing Stops ───")
+        manage_trailing_stops(state)
 
-    # Scan zero-fee tokens for signals
-    log("  🔍 Scanning zero-fee tokens for EMA/RSI signals...")
-    signal_found = False
+    # Step 2: Look for new signals if we have open slots
+    active = state.get("active_positions", [])
+    active_symbols = [p["symbol"] for p in active]
 
-    for symbol in ZERO_FEE_SYMBOLS:
-        signal = get_signal(symbol)
-        if not signal:
-            continue
+    if len(active) < MAX_POSITIONS:
+        log("─── Scanning for New Signals ───")
+        for symbol in ZERO_FEE_SYMBOLS:
+            if symbol in active_symbols:
+                continue
+            if len(active) >= MAX_POSITIONS:
+                break
 
-        # Get current price
-        price = get_ticker_price(symbol)
-        if price <= 0:
-            log(f"  ⚠️ {symbol}: could not get price")
-            continue
+            signal = get_signal(symbol)
+            if signal:
+                result = place_trade(
+                    symbol=symbol,
+                    direction=signal["direction"],
+                    price=signal["price"],
+                    atr=signal["atr"],
+                    balance=balance,
+                )
+                if result:
+                    active.append(result)
+                    state["active_positions"] = active
+                    save_state(state)
+                    # Reduce available balance for next trade
+                    balance = get_balance()
+    else:
+        log("  All slots filled — monitoring only")
 
-        log(f"  🎯 Signal: {signal} {symbol} @ ${price:.6f}")
+    # Save final state
+    save_state(state)
 
-        # Place trade
-        trade = place_scalp_trade(symbol, signal, price, balance)
-        if trade:
-            state["active_position"] = trade
-            save_state(state)
-            send_scalp_alert(trade, balance)
-            signal_found = True
-            break  # Only 1 position at a time
-
-        time.sleep(0.2)
-
-    if not signal_found:
-        log("  ⏳ No EMA/RSI signals this scan.")
-
-    log(f"\n  📊 Total scalp trades: {state.get('total_trades', 0)}")
-    log("=" * 60)
+    # Summary
+    history = load_trade_history()
+    kelly = calc_kelly_fraction(history)
+    log(f"─── Summary: {len(active)} active | {state.get('total_trades', 0)} total trades | Kelly={kelly:.3f} ───")
+    log("")
 
 if __name__ == "__main__":
     main()
