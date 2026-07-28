@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 
 BITUNIX_API = "https://fapi.bitunix.com"
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-ALERT_EMAIL = os.getenv("ALERT_EMAIL_TO", "big.main@protonmail.com")
+ALERT_EMAIL = os.getenv("ALERT_EMAIL_TO", "")
 
 DATA_DIR = "/home/ubuntu/trading_sniper/data"
 JOURNAL_FILE = f"{DATA_DIR}/trade_journal.json"

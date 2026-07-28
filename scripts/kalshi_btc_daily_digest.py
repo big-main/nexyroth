@@ -19,7 +19,7 @@ from anthropic import Anthropic
 
 # ── Config ────────────────────────────────────────────────────────────────────
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-ALERT_EMAIL    = os.getenv("ALERT_EMAIL_TO", "big.main@protonmail.com")
+ALERT_EMAIL    = os.getenv("ALERT_EMAIL_TO", "")
 DATA_DIR       = "/home/ubuntu/trading_sniper/data"
 LOG_FILE       = "/home/ubuntu/trading_sniper/kalshi_digest.log"
 ANTHROPIC_KEY  = os.getenv("ANTHROPIC_API_KEY", "")

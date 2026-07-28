@@ -12,7 +12,7 @@ BITUNIX_API  = "https://fapi.bitunix.com"
 MIN_BALANCE  = 3.0
 CHECK_EVERY  = 120  # seconds
 RESEND_KEY   = os.getenv("RESEND_API_KEY", "")
-ALERT_EMAIL  = os.getenv("ALERT_EMAIL_TO", "big.main@protonmail.com")
+ALERT_EMAIL  = os.getenv("ALERT_EMAIL_TO", "")
 LOG_FILE     = os.path.expanduser("~/trading_sniper/deposit_monitor.log")
 
 def _read_secret(env_var, path):

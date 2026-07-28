@@ -8,8 +8,8 @@ import json
 from datetime import datetime
 import os
 
-RESEND_API_KEY = os.getenv('RESEND_API_KEY', 're_dJrtkV1k_QHTeiziapzTXFvUMMS5uwWfU')
-ALERT_EMAIL = os.getenv('ALERT_EMAIL_TO', 'big.main@protonmail.com')
+RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
+ALERT_EMAIL = os.getenv('ALERT_EMAIL_TO', '')
 
 def send_email(subject, html_body, email_to=None):
     """Send email via Resend API"""

@@ -34,7 +34,7 @@ from datetime import datetime, timezone
 # ═══════════════════════════════════════════════════════════════
 BITUNIX_API = "https://fapi.bitunix.com"
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-ALERT_EMAIL = os.getenv("ALERT_EMAIL_TO", "big.main@protonmail.com")
+ALERT_EMAIL = os.getenv("ALERT_EMAIL_TO", "")
 LOG_FILE = "/home/ubuntu/trading_sniper/funding_arb_maximizer.log"
 STATE_FILE = "/home/ubuntu/trading_sniper/data/funding_arb_state.json"
 HISTORY_FILE = "/home/ubuntu/trading_sniper/data/funding_arb_history.json"

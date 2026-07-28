@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 SITE_URL = "https://chalkpicks.live"
 SITEMAP_URL = f"{SITE_URL}/sitemap.xml"
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-ALERT_EMAIL = os.getenv("ALERT_EMAIL_TO", "big.main@protonmail.com")
+ALERT_EMAIL = os.getenv("ALERT_EMAIL_TO", "")
 LOG_FILE = os.path.expanduser("~/trading_sniper/chalkpicks_traffic.log")
 STATE_FILE = os.path.expanduser("~/trading_sniper/data/chalkpicks_traffic_state.json")
 

@@ -18,8 +18,8 @@ from datetime import datetime, timezone
 from anthropic import Anthropic
 
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-ALERT_EMAIL    = os.getenv("ALERT_EMAIL_TO", "big.main@protonmail.com")
-ANTHROPIC_KEY  = os.getenv("ANTHROPIC_API_KEY", "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")
+ALERT_EMAIL    = os.getenv("ALERT_EMAIL_TO", "")
+ANTHROPIC_KEY  = os.getenv("ANTHROPIC_API_KEY", "")
 OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "")
 DATA_DIR       = "/home/ubuntu/trading_sniper/data"
 LOG_FILE       = "/home/ubuntu/trading_sniper/bitunix_digest.log"

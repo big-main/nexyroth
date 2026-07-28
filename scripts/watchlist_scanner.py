@@ -13,7 +13,7 @@ BITUNIX_API  = "https://fapi.bitunix.com"
 WATCHLIST    = "/home/ubuntu/trading_sniper/watchlist.json"
 LOG_FILE     = "/home/ubuntu/trading_sniper/watchlist_scanner.log"
 RESEND_KEY   = os.getenv("RESEND_API_KEY", "")
-ALERT_EMAIL  = os.getenv("ALERT_EMAIL_TO", "big.main@protonmail.com")
+ALERT_EMAIL  = os.getenv("ALERT_EMAIL_TO", "")
 
 def log(msg):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

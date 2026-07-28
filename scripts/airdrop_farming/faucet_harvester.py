@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 WALLET_FILE = os.path.expanduser("~/trading_sniper/data/airdrop_wallets/farming_wallets.json")
 LOG_FILE = os.path.expanduser("~/trading_sniper/data/airdrop_logs/faucet_harvest.log")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-ALERT_EMAIL = os.getenv("ALERT_EMAIL_TO", "big.main@protonmail.com")
+ALERT_EMAIL = os.getenv("ALERT_EMAIL_TO", "")
 
 # Minimum balances needed for farming (very small - just gas)
 MIN_SOL_BALANCE = 0.01   # ~$0.002 worth, enough for ~10 transactions

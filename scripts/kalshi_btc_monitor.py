@@ -41,8 +41,8 @@ GRiFbBPKxNqyhIpYfl5+nsM6ARfi0d8FNnakH3Nyv3bG1ufJwCr4SjZOU/Cg/tV9
 QEGYEhyorUzfqar8BCWTO8OMthkDKCWu2bfXZ9X+93jkv20rPwCQTA==
 -----END RSA PRIVATE KEY-----"""
 
-RESEND_API_KEY = os.getenv('RESEND_API_KEY', 're_dJrtkV1k_QHTeiziapzTXFvUMMS5uwWfU')
-ALERT_EMAIL   = os.getenv('ALERT_EMAIL_TO', 'big.main@protonmail.com')
+RESEND_API_KEY = os.getenv('RESEND_API_KEY', '')
+ALERT_EMAIL   = os.getenv('ALERT_EMAIL_TO', '')
 
 BASE_URL   = "https://api.elections.kalshi.com/trade-api/v2"
 API_PREFIX = "/trade-api/v2"

@@ -17,7 +17,7 @@ STATE_FILE = os.path.expanduser("~/trading_sniper/data/airdrop_logs/farming_stat
 LOG_FILE = os.path.expanduser("~/trading_sniper/data/airdrop_logs/farming_activity.log")
 HARVEST_STATE = os.path.expanduser("~/trading_sniper/data/airdrop_logs/harvest_state.json")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
-ALERT_EMAIL = os.getenv("ALERT_EMAIL_TO", "big.main@protonmail.com")
+ALERT_EMAIL = os.getenv("ALERT_EMAIL_TO", "")
 
 # Solana RPC
 SOLANA_RPC = "https://api.mainnet-beta.solana.com"

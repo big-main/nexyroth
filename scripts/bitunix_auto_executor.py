@@ -49,7 +49,7 @@ def _read_secret(env_var: str, path: str) -> str:
 API_KEY    = _read_secret("BITUNIX_API_KEY",    os.path.expanduser("~/.secrets/bitunix_api_key"))
 SECRET_KEY = _read_secret("BITUNIX_SECRET_KEY", os.path.expanduser("~/.secrets/bitunix_secret_key"))
 RESEND_API_KEY   = os.getenv("RESEND_API_KEY", "")
-ALERT_EMAIL      = os.getenv("ALERT_EMAIL_TO", "big.main@protonmail.com")
+ALERT_EMAIL      = os.getenv("ALERT_EMAIL_TO", "")
 
 LOG_FILE         = "/home/ubuntu/trading_sniper/bitunix_auto_executor.log"
 STATE_FILE       = "/home/ubuntu/trading_sniper/data/auto_executor_state.json"
