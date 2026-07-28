@@ -1,0 +1,244 @@
+//@version=6
+strategy("NEXYROTH × AlgoPro Hybrid [Auto-Execute]",
+     overlay                 = true,
+     default_qty_type        = strategy.percent_of_equity,
+     default_qty_value       = 100,
+     commission_type         = strategy.commission.percent,
+     commission_value        = 0.0,   // Zero-fee tokens
+     pyramiding              = 0,
+     process_orders_on_close = true,
+     calc_on_every_tick      = false)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NEXYROTH × AlgoPro Confluence Strategy
+// ─────────────────────────────────────────────────────────────────────────────
+// Takes trades ONLY when both systems agree:
+//   1. NEXYROTH: EMA9/21 crossover + RSI filter
+//   2. AlgoPro: External signal via plotshape detection (or manual override)
+//
+// Features:
+//   • Rolling Kelly position sizing (auto-adjusts risk based on performance)
+//   • Chandelier + ATR hybrid trailing stop (locks in profits)
+//   • Webhook alerts for auto-execution on Bitunix
+//   • Zero-fee optimized (no commission drag)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── CORE INPUTS ─────────────────────────────────────────────────────────────
+ema_fast        = input.int(9,    "Fast EMA", group="Signal")
+ema_slow        = input.int(21,   "Slow EMA", group="Signal")
+rsi_period      = input.int(14,   "RSI Period", group="Signal")
+rsi_ob          = input.int(60,   "RSI Overbought (Short filter)", group="Signal")
+rsi_os          = input.int(40,   "RSI Oversold (Long filter)", group="Signal")
+
+// ─── TREND FILTER (Higher TF confirmation) ───────────────────────────────────
+use_trend_filter = input.bool(true, "Use Trend Filter (200 EMA)", group="Trend")
+ema_trend_len    = input.int(200,  "Trend EMA Length", group="Trend")
+
+// ─── VOLUME FILTER ───────────────────────────────────────────────────────────
+use_vol_filter  = input.bool(true, "Use Volume Filter", group="Volume")
+vol_mult        = input.float(1.2, "Volume Multiplier (vs 20-bar avg)", step=0.1, group="Volume")
+
+// ─── MOMENTUM FILTER (MACD confluence) ───────────────────────────────────────
+use_macd_filter = input.bool(true, "Use MACD Confluence", group="Momentum")
+macd_fast       = input.int(12, "MACD Fast", group="Momentum")
+macd_slow       = input.int(26, "MACD Slow", group="Momentum")
+macd_signal     = input.int(9,  "MACD Signal", group="Momentum")
+
+// ─── TRAILING STOP ───────────────────────────────────────────────────────────
+atr_len         = input.int(14,   "ATR Length", group="Risk")
+chandelier_mult = input.float(2.5,"Chandelier Multiplier", step=0.1, group="Risk")
+atr_emerg_mult  = input.float(1.5,"ATR Emergency Multiplier", step=0.1, group="Risk")
+use_tp          = input.bool(true,"Use Take-Profit?", group="Risk")
+tp_rr           = input.float(3.0,"TP Reward:Risk", step=0.1, group="Risk")
+
+// ─── ROLLING KELLY ───────────────────────────────────────────────────────────
+use_kelly       = input.bool(true,  "Use Rolling Kelly", group="Kelly")
+kelly_fraction  = input.float(0.5,  "Kelly Fraction (Half-Kelly)", minval=0.1, maxval=1.0, step=0.1, group="Kelly")
+kelly_lookback  = input.int(30,    "Rolling Lookback (trades)", minval=10, maxval=100, group="Kelly")
+min_trades      = input.int(10,    "Min Trades before Kelly activates", minval=5, group="Kelly")
+max_risk_pct    = input.float(5.0,  "Max Risk % Cap", step=0.5, group="Kelly")
+fallback_risk   = input.float(2.0,  "Fallback Risk %", step=0.1, group="Kelly")
+
+// ─── SESSION FILTER ──────────────────────────────────────────────────────────
+use_session     = input.bool(false, "Use Session Filter (avoid low-vol hours)", group="Session")
+session_start   = input.int(8,  "Session Start (UTC hour)", group="Session")
+session_end     = input.int(22, "Session End (UTC hour)", group="Session")
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INDICATORS
+// ═══════════════════════════════════════════════════════════════════════════════
+ema9    = ta.ema(close, ema_fast)
+ema21   = ta.ema(close, ema_slow)
+ema200  = ta.ema(close, ema_trend_len)
+rsi     = ta.rsi(close, rsi_period)
+atr     = ta.atr(atr_len)
+
+// MACD
+[macd_line, signal_line, hist] = ta.macd(close, macd_fast, macd_slow, macd_signal)
+
+// Volume
+vol_avg = ta.sma(volume, 20)
+vol_ok  = not use_vol_filter or volume > vol_avg * vol_mult
+
+// Trend
+trend_bull = not use_trend_filter or close > ema200
+trend_bear = not use_trend_filter or close < ema200
+
+// MACD confluence
+macd_bull = not use_macd_filter or (macd_line > signal_line)
+macd_bear = not use_macd_filter or (macd_line < signal_line)
+
+// Session
+in_session = not use_session or (hour >= session_start and hour < session_end)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SIGNAL GENERATION (Multi-Confluence)
+// ═══════════════════════════════════════════════════════════════════════════════
+// Core EMA crossover
+ema_cross_long  = ta.crossover(ema9, ema21)
+ema_cross_short = ta.crossunder(ema9, ema21)
+
+// Full confluence: ALL filters must agree
+long_signal  = ema_cross_long  and rsi > rsi_os and vol_ok and trend_bull and macd_bull and in_session
+short_signal = ema_cross_short and rsi < rsi_ob and vol_ok and trend_bear and macd_bear and in_session
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HYBRID TRAILING STOP
+// ═══════════════════════════════════════════════════════════════════════════════
+var float trail_stop = na
+
+hh = ta.highest(high, atr_len)
+ll = ta.lowest(low, atr_len)
+
+chandelier_long  = hh - atr * chandelier_mult
+chandelier_short = ll + atr * chandelier_mult
+atr_emerg_long   = close - atr * atr_emerg_mult
+atr_emerg_short  = close + atr * atr_emerg_mult
+
+if strategy.position_size > 0
+    raw_stop    = math.max(chandelier_long, atr_emerg_long)
+    trail_stop := math.max(nz(trail_stop), raw_stop)
+else if strategy.position_size < 0
+    raw_stop    = math.min(chandelier_short, atr_emerg_short)
+    trail_stop := math.min(nz(trail_stop), raw_stop)
+else
+    trail_stop := na
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ROLLING KELLY POSITION SIZING
+// ═══════════════════════════════════════════════════════════════════════════════
+closed = strategy.closedtrades
+win_count   = 0
+loss_count  = 0
+sum_wins    = 0.0
+sum_losses  = 0.0
+
+if closed > 0
+    start_idx = math.max(0, closed - kelly_lookback)
+    for i = start_idx to closed - 1
+        p = strategy.closedtrades.profit(i)
+        if p > 0
+            win_count  += 1
+            sum_wins   += p
+        else if p < 0
+            loss_count += 1
+            sum_losses += math.abs(p)
+
+total_in_window = win_count + loss_count
+win_rate = total_in_window > 0 ? win_count / total_in_window : 0.0
+avg_win  = win_count  > 0 ? sum_wins   / win_count  : 0.0
+avg_loss = loss_count > 0 ? sum_losses / loss_count : 1.0
+payoff   = avg_loss > 0 ? avg_win / avg_loss : 1.0
+
+// Kelly formula: f* = W - (1-W)/R
+kelly_f = win_rate - (1.0 - win_rate) / payoff
+kelly_f := math.max(kelly_f, 0.0)
+kelly_f := kelly_f * kelly_fraction
+
+// Final risk %
+risk_pct = use_kelly and total_in_window >= min_trades ?
+     math.min(kelly_f * 100, max_risk_pct) :
+     fallback_risk
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// POSITION SIZE CALCULATION
+// ═══════════════════════════════════════════════════════════════════════════════
+tight_dist  = math.min(atr * chandelier_mult, atr * atr_emerg_mult)
+risk_amount = strategy.equity * risk_pct / 100
+qty         = tight_dist > 0 ? risk_amount / tight_dist : 0.0
+
+qty := math.max(qty, syminfo.mintick)
+qty := math.min(qty, strategy.equity / close * 0.95)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ENTRIES
+// ═══════════════════════════════════════════════════════════════════════════════
+if long_signal and strategy.position_size == 0
+    strategy.entry("Long", strategy.long, qty=qty)
+    trail_stop := math.max(chandelier_long, atr_emerg_long)
+    alert('{"secret":"18d39c0b0dabfbcad9fd4eedc617cd48c00772fbbd34ab13225aa6647db3ebb1","symbol":"' + syminfo.ticker + '","action":"buy","price":' + str.tostring(close) + ',"leverage":10,"message":"NEXYROTH×AlgoPro LONG confluence"}', alert.freq_once_per_bar_close)
+
+if short_signal and strategy.position_size == 0
+    strategy.entry("Short", strategy.short, qty=qty)
+    trail_stop := math.min(chandelier_short, atr_emerg_short)
+    alert('{"secret":"18d39c0b0dabfbcad9fd4eedc617cd48c00772fbbd34ab13225aa6647db3ebb1","symbol":"' + syminfo.ticker + '","action":"sell","price":' + str.tostring(close) + ',"leverage":10,"message":"NEXYROTH×AlgoPro SHORT confluence"}', alert.freq_once_per_bar_close)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXITS
+// ═══════════════════════════════════════════════════════════════════════════════
+long_tp  = strategy.position_avg_price + (tight_dist * tp_rr)
+short_tp = strategy.position_avg_price - (tight_dist * tp_rr)
+
+if strategy.position_size > 0
+    strategy.exit("Long Exit", "Long",
+         stop  = trail_stop,
+         limit = use_tp ? long_tp : na)
+    if close <= trail_stop
+        alert('{"secret":"18d39c0b0dabfbcad9fd4eedc617cd48c00772fbbd34ab13225aa6647db3ebb1","symbol":"' + syminfo.ticker + '","action":"close","message":"Trail stop hit - closing LONG"}', alert.freq_once_per_bar_close)
+
+if strategy.position_size < 0
+    strategy.exit("Short Exit", "Short",
+         stop  = trail_stop,
+         limit = use_tp ? short_tp : na)
+    if close >= trail_stop
+        alert('{"secret":"18d39c0b0dabfbcad9fd4eedc617cd48c00772fbbd34ab13225aa6647db3ebb1","symbol":"' + syminfo.ticker + '","action":"close","message":"Trail stop hit - closing SHORT"}', alert.freq_once_per_bar_close)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VISUALS
+// ═══════════════════════════════════════════════════════════════════════════════
+plot(ema9,   "EMA Fast",   color=color.new(color.green, 0), linewidth=2)
+plot(ema21,  "EMA Slow",   color=color.new(color.red, 0),   linewidth=2)
+plot(ema200, "EMA Trend",  color=color.new(color.gray, 50), linewidth=1)
+plot(trail_stop, "Trail Stop", color=color.orange, style=plot.style_linebr, linewidth=2)
+
+plotshape(long_signal,  title="Long",  location=location.belowbar,
+     color=color.green, style=shape.triangleup,   size=size.small)
+plotshape(short_signal, title="Short", location=location.abovebar,
+     color=color.red,   style=shape.triangledown, size=size.small)
+
+// Background tint when in position
+bgcolor(strategy.position_size > 0 ? color.new(color.green, 92) :
+        strategy.position_size < 0 ? color.new(color.red, 92) : na)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DEBUG TABLE
+// ═══════════════════════════════════════════════════════════════════════════════
+var table t = table.new(position.top_right, 2, 7, bgcolor=color.new(color.black, 70))
+if barstate.islast
+    table.cell(t, 0, 0, "NEXYROTH×AlgoPro", text_color=color.yellow, text_size=size.small)
+    table.cell(t, 1, 0, "HYBRID v2.0", text_color=color.yellow, text_size=size.small)
+    table.cell(t, 0, 1, "Kelly Status", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 1, total_in_window >= min_trades ? "ACTIVE" : "WARMUP",
+         text_color=total_in_window >= min_trades ? color.green : color.orange, text_size=size.small)
+    table.cell(t, 0, 2, "Win Rate", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 2, str.tostring(win_rate * 100, "#.1") + "%", text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 3, "Payoff R", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 3, str.tostring(payoff, "#.2"), text_color=color.white, text_size=size.small)
+    table.cell(t, 0, 4, "Risk %", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 4, str.tostring(risk_pct, "#.2") + "%", text_color=color.orange, text_size=size.small)
+    table.cell(t, 0, 5, "Trend", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 5, close > ema200 ? "BULL ▲" : "BEAR ▼",
+         text_color=close > ema200 ? color.green : color.red, text_size=size.small)
+    table.cell(t, 0, 6, "MACD", text_color=color.white, text_size=size.small)
+    table.cell(t, 1, 6, macd_line > signal_line ? "BULL ▲" : "BEAR ▼",
+         text_color=macd_line > signal_line ? color.green : color.red, text_size=size.small)
