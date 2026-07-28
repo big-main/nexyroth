@@ -1,0 +1,8 @@
+*.log
+*.json
+data/
+reports/
+__pycache__/
+*.pyc
+.env
+.secrets/
