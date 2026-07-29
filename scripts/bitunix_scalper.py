@@ -37,6 +37,35 @@ import math
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Tuple
 
+# ── WebSocket data cache path (written by bitunix_ws_streamer.py) ──
+WS_DATA_FILE = "/tmp/nexyroth_ws_data.json"
+WS_STALE_THRESHOLD = 90  # seconds
+
+def _get_ws_price(symbol: str) -> float:
+    """Get latest price from WebSocket cache. Returns 0.0 if stale/missing."""
+    try:
+        with open(WS_DATA_FILE) as f:
+            payload = json.load(f)
+        sym = payload.get("symbols", {}).get(symbol)
+        if not sym:
+            return 0.0
+        age = time.time() - sym.get("updated", 0)
+        if age > WS_STALE_THRESHOLD:
+            return 0.0
+        return float(sym.get("close", 0) or 0)
+    except Exception:
+        return 0.0
+
+def _ws_is_healthy() -> bool:
+    """Check if WebSocket streamer is alive and data is fresh."""
+    try:
+        with open(WS_DATA_FILE) as f:
+            payload = json.load(f)
+        age = time.time() - payload.get("updated_at", 0)
+        return age < WS_STALE_THRESHOLD
+    except Exception:
+        return False
+
 # ═══════════════════════════════════════════════════════════════
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════
@@ -246,7 +275,12 @@ def get_klines(symbol: str, interval: str = "1m", limit: int = 250) -> List[dict
         return []
 
 def get_ticker_price(symbol: str) -> float:
-    """Get current last price."""
+    """Get current last price. Uses WebSocket cache first, falls back to REST."""
+    # Try WebSocket cache first (real-time, zero latency)
+    ws_price = _get_ws_price(symbol)
+    if ws_price > 0:
+        return ws_price
+    # Fallback: REST API
     try:
         r = requests.get(
             f"{BITUNIX_API}/api/v1/futures/market/tickers",
@@ -682,7 +716,29 @@ def load_state() -> dict:
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE) as f:
-                return json.load(f)
+                state = json.load(f)
+            # Backward compat: migrate singular active_position → active_positions list
+            if 'active_position' in state and 'active_positions' not in state:
+                pos = state.pop('active_position')
+                state['active_positions'] = [pos] if pos else []
+            elif 'active_positions' not in state:
+                state['active_positions'] = []
+            # Normalize camelCase field names from old format to snake_case
+            for pos in state['active_positions']:
+                if 'entryPrice' in pos and 'entry_price' not in pos:
+                    pos['entry_price'] = pos.pop('entryPrice')
+                if 'tpPrice' in pos and 'tp' not in pos:
+                    pos['tp'] = float(pos.pop('tpPrice'))
+                if 'slPrice' in pos and 'sl' not in pos:
+                    pos['sl'] = float(pos.pop('slPrice'))
+                if 'orderId' in pos and 'order_id' not in pos:
+                    pos['order_id'] = pos.pop('orderId')
+                if 'openTime' in pos and 'timestamp' not in pos:
+                    pos['timestamp'] = pos.pop('openTime')
+                if 'atr' not in pos:
+                    pos['atr'] = 0.001  # fallback ATR
+            save_state(state)
+            return state
         except:
             pass
     return {"active_positions": [], "total_trades": 0, "total_pnl": 0.0}
@@ -698,6 +754,8 @@ def save_state(state: dict):
 def main():
     log("=" * 60)
     log("NEXYROTH × AlgoPro Hybrid Scalper v2.0 — Scan Start")
+    ws_status = "🟢 LIVE" if _ws_is_healthy() else "🔴 STALE (REST fallback)"
+    log(f"  WebSocket feed: {ws_status}")
     log("=" * 60)
 
     if not API_KEY or not SECRET_KEY:
