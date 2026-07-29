@@ -105,12 +105,15 @@ MACD_SIGNAL     = 9
 
 # RSI
 RSI_PERIOD      = 14
-RSI_LONG_MIN    = 35   # WIDENED: was 45 (allows oversold bounce entries)
-RSI_SHORT_MAX   = 65   # WIDENED: was 55 (allows overbought short entries)
-
+RSI_LONG_MIN    = 25   # SENSITIVE: wide range, catches reversals early
+RSI_SHORT_MAX   = 75   # SENSITIVE: wide range, catches reversals early
 # Volume
-VOL_MULT        = 0.8    # TEMP LOWERED: 0.8x (was 1.2x) to catch bounce exhaustion signals
+VOL_MULT        = 0.5    # SENSITIVE: 0.5x — only blocks truly dead volume
 VOL_LOOKBACK    = 20
+# VWAP sensitivity (candle window)
+VWAP_WINDOW     = 30   # SENSITIVE: 30-candle window (was 60) — more responsive
+# CVD sensitivity
+CVD_LOOKBACK    = 10   # SENSITIVE: 10-candle lookback (was 20) — faster signal
 
 # ATR / Chandelier
 ATR_PERIOD      = 14
@@ -495,8 +498,8 @@ def get_signal(symbol: str) -> Optional[Dict]:
         return None
 
     # ─── Filter 6: VWAP Confirmation ─────────────────────────────
-    # Use last 60 candles as the intraday VWAP window
-    vwap = calc_vwap(candles[-60:])
+    # Use VWAP_WINDOW candles as the intraday VWAP window
+    vwap = calc_vwap(candles[-VWAP_WINDOW:])
     if vwap > 0:
         if direction == "LONG" and current_price < vwap:
             return None  # Price below VWAP — no LONG
@@ -504,8 +507,8 @@ def get_signal(symbol: str) -> Optional[Dict]:
             return None  # Price above VWAP — no SHORT
 
     # ─── Filter 7: CVD Confirmation ──────────────────────────────
-    # CVD over last 20 candles must agree with direction
-    cvd = calc_cvd(candles, lookback=20)
+    # CVD over CVD_LOOKBACK candles must agree with direction
+    cvd = calc_cvd(candles, lookback=CVD_LOOKBACK)
     if direction == "LONG" and cvd < 0:
         return None  # Net selling pressure — skip LONG
     if direction == "SHORT" and cvd > 0:
