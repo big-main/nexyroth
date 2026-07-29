@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NEXYROTH × AlgoPro Hybrid Scalper v2.0
+NEXYROTH × AlgoPro Hybrid Scalper v2.1
 =======================================
 Full confluence strategy running natively on cloud computer.
 No TradingView needed — all indicators computed locally.
@@ -9,8 +9,10 @@ Strategy Filters (ALL must agree for entry):
   1. EMA 9/21 crossover (primary signal)
   2. 200 EMA trend filter (only LONG above, SHORT below)
   3. MACD histogram confirmation (positive for LONG, negative for SHORT)
-  4. Volume filter (1.2x above 20-bar average)
-  5. RSI filter (>45 for LONG, <55 for SHORT)
+  4. Volume filter (0.8x above 20-bar average)
+  5. RSI filter (>35 for LONG, <65 for SHORT)
+  6. VWAP filter (price above VWAP for LONG, below for SHORT)
+  7. CVD filter (cumulative volume delta confirms direction)
 
 Risk Management:
   - Rolling Kelly Criterion position sizing (adapts to win rate)
@@ -103,11 +105,11 @@ MACD_SIGNAL     = 9
 
 # RSI
 RSI_PERIOD      = 14
-RSI_LONG_MIN    = 45
-RSI_SHORT_MAX   = 55
+RSI_LONG_MIN    = 35   # WIDENED: was 45 (allows oversold bounce entries)
+RSI_SHORT_MAX   = 65   # WIDENED: was 55 (allows overbought short entries)
 
 # Volume
-VOL_MULT        = 1.2    # Volume must be 1.2x above 20-bar avg
+VOL_MULT        = 0.8    # TEMP LOWERED: 0.8x (was 1.2x) to catch bounce exhaustion signals
 VOL_LOOKBACK    = 20
 
 # ATR / Chandelier
@@ -389,6 +391,45 @@ def calc_volume_ratio(candles: List[dict], lookback: int = 20) -> float:
         return 0.0
     return volumes[-1] / avg_vol
 
+def calc_vwap(candles: List[dict]) -> float:
+    """
+    Volume-Weighted Average Price (VWAP) over the provided candles.
+    VWAP = sum(typical_price * volume) / sum(volume)
+    Typical price = (high + low + close) / 3
+    Uses all candles provided (caller controls the window).
+    """
+    if not candles:
+        return 0.0
+    cum_tp_vol = 0.0
+    cum_vol = 0.0
+    for c in candles:
+        tp = (c["high"] + c["low"] + c["close"]) / 3.0
+        v  = c["volume"]
+        cum_tp_vol += tp * v
+        cum_vol    += v
+    if cum_vol == 0:
+        return 0.0
+    return cum_tp_vol / cum_vol
+
+def calc_cvd(candles: List[dict], lookback: int = 20) -> float:
+    """
+    Cumulative Volume Delta (CVD) over the last `lookback` candles.
+    Delta per candle = +volume if close > open (buying pressure)
+                     = -volume if close < open (selling pressure)
+    Positive CVD = net buying; Negative CVD = net selling.
+    Returns the raw CVD value (not normalised).
+    """
+    if len(candles) < lookback:
+        return 0.0
+    recent = candles[-lookback:]
+    cvd = 0.0
+    for c in recent:
+        if c["close"] > c["open"]:
+            cvd += c["volume"]
+        elif c["close"] < c["open"]:
+            cvd -= c["volume"]
+    return cvd
+
 # ═══════════════════════════════════════════════════════════════
 # SIGNAL GENERATION — Full Confluence
 # ═══════════════════════════════════════════════════════════════
@@ -453,15 +494,30 @@ def get_signal(symbol: str) -> Optional[Dict]:
     if direction == "SHORT" and current_rsi > RSI_SHORT_MAX:
         return None
 
-    # ─── All 5 filters passed! ──────────────────────────────────
-    atr = calc_atr(candles, ATR_PERIOD)
+    # ─── Filter 6: VWAP Confirmation ─────────────────────────────
+    # Use last 60 candles as the intraday VWAP window
+    vwap = calc_vwap(candles[-60:])
+    if vwap > 0:
+        if direction == "LONG" and current_price < vwap:
+            return None  # Price below VWAP — no LONG
+        if direction == "SHORT" and current_price > vwap:
+            return None  # Price above VWAP — no SHORT
 
-    log(f"  ✅ {symbol}: {direction} SIGNAL CONFIRMED")
+    # ─── Filter 7: CVD Confirmation ──────────────────────────────
+    # CVD over last 20 candles must agree with direction
+    cvd = calc_cvd(candles, lookback=20)
+    if direction == "LONG" and cvd < 0:
+        return None  # Net selling pressure — skip LONG
+    if direction == "SHORT" and cvd > 0:
+        return None  # Net buying pressure — skip SHORT
+
+    # ─── All 7 filters passed! ──────────────────────────────────
+    atr = calc_atr(candles, ATR_PERIOD)
+    log(f"  ✅ {symbol}: {direction} SIGNAL CONFIRMED (v2.1)")
     log(f"     EMA9={ef[-1]:.6f} {'>' if direction=='LONG' else '<'} EMA21={es[-1]:.6f}")
     log(f"     Price {'>' if direction=='LONG' else '<'} EMA200={trend_ema:.6f}")
     log(f"     MACD hist={histogram:.8f} | RSI={current_rsi:.1f} | Vol={vol_ratio:.2f}x")
-    log(f"     ATR={atr:.8f}")
-
+    log(f"     VWAP={vwap:.6f} | CVD={cvd:.2f} | ATR={atr:.8f}")
     return {
         "direction": direction,
         "price": current_price,
@@ -469,6 +525,8 @@ def get_signal(symbol: str) -> Optional[Dict]:
         "rsi": current_rsi,
         "macd_hist": histogram,
         "vol_ratio": vol_ratio,
+        "vwap": vwap,
+        "cvd": cvd,
     }
 
 # ═══════════════════════════════════════════════════════════════
@@ -592,7 +650,13 @@ def place_trade(symbol: str, direction: str, price: float, atr: float, balance: 
     if result:
         order_id = result.get("orderId", "unknown")
         log(f"  ✅ ORDER FILLED: {order_id}")
-        send_alert(f"🎯 SCALPER {direction} {symbol}\nQty: {qty}\nEntry: ~{price}\nTP: {tp_price}\nSL: {sl_price}\nKelly: {risk_frac:.3f}\nOrder: {order_id}")
+        send_alert(
+            f"🎯 <b>NEXYROTH {direction} {symbol}</b>\n"
+            f"💰 Entry: <code>~{price}</code>\n"
+            f"🟢 TP: <code>{tp_price}</code>  🔴 SL: <code>{sl_price}</code>\n"
+            f"📊 Qty: {qty} | Kelly: {risk_frac:.3f} | Lev: {LEVERAGE}x\n"
+            f"📈 Order: {order_id}"
+        )
         return {
             "symbol": symbol,
             "direction": direction,
@@ -685,12 +749,49 @@ def close_position(symbol: str, direction: str, exit_price: float, pos: dict, st
     state["total_trades"] = state.get("total_trades", 0) + 1
     state["total_pnl"] = state.get("total_pnl", 0) + pnl_pct
 
-    send_alert(f"💰 SCALPER CLOSED {symbol} {direction}\nEntry: {entry}\nExit: {exit_price}\nPnL: {pnl_pct*100:.2f}%")
+    pnl_emoji = "🟢" if pnl_pct >= 0 else "🔴"
+    send_alert(
+        f"{pnl_emoji} <b>NEXYROTH CLOSED {symbol}</b>\n"
+        f"📍 Entry: <code>{entry}</code> → Exit: <code>{exit_price}</code>\n"
+        f"💰 PnL: <b>{pnl_pct*100:+.2f}%</b> ({pnl_usdt:+.4f} USDT)\n"
+        f"📈 Direction: {direction} | Trades: {state.get('total_trades', 0)}"
+    )
 
 # ═══════════════════════════════════════════════════════════════
 # EMAIL ALERTS
 # ═══════════════════════════════════════════════════════════════
+# ── Telegram credentials (read from secrets file) ──
+_TG_TOKEN_FILE = "/home/ubuntu/.secrets/telegram_bot_token"
+_TG_CHAT_FILE  = "/home/ubuntu/.secrets/telegram_chat_id"
+
+def _read_file(path: str) -> str:
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+TELEGRAM_BOT_TOKEN = _read_file(_TG_TOKEN_FILE)
+TELEGRAM_CHAT_ID   = _read_file(_TG_CHAT_FILE)
+
+def send_telegram(msg: str):
+    """Send a Telegram message to the configured chat."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
+            timeout=8,
+        )
+    except Exception:
+        pass
+
 def send_alert(msg: str):
+    """Send alert via Telegram (instant) + email (backup)."""
+    # Telegram — primary (instant mobile push)
+    send_telegram(msg)
+    # Email — backup via Resend
     if not RESEND_API_KEY:
         return
     try:
@@ -705,7 +806,7 @@ def send_alert(msg: str):
             },
             timeout=10,
         )
-    except:
+    except Exception:
         pass
 
 # ═══════════════════════════════════════════════════════════════
@@ -753,7 +854,7 @@ def save_state(state: dict):
 # ═══════════════════════════════════════════════════════════════
 def main():
     log("=" * 60)
-    log("NEXYROTH × AlgoPro Hybrid Scalper v2.0 — Scan Start")
+    log("NEXYROTH × AlgoPro Hybrid Scalper v2.1 — Scan Start")
     ws_status = "🟢 LIVE" if _ws_is_healthy() else "🔴 STALE (REST fallback)"
     log(f"  WebSocket feed: {ws_status}")
     log("=" * 60)
