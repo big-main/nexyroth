@@ -80,8 +80,9 @@ RSI_LONG_MAX     = 75      # Don't LONG if RSI already overbought
 RSI_SHORT_MIN    = 25      # Don't SHORT if RSI already oversold
 
 # Exit thresholds (tight for HF)
-TP_PCT           = 0.004   # +0.4% price move = TP (10x = +4% account)
+TP_PCT           = 0.006   # +0.6% price move = TP (10x = +6% account) — 3:1 ratio
 SL_PCT           = 0.002   # -0.2% price move = SL (10x = -2% account)
+MIN_CANDLE_BODY  = 0.0005  # Min avg candle body pct (0.05%) — filters weak chop
 
 # Cooldown: don't re-enter same symbol for N seconds after close
 COOLDOWN_SECS    = 180     # 3 minutes
@@ -386,12 +387,24 @@ def get_hf_signal(symbol: str) -> Optional[dict]:
     if direction == "SHORT" and rsi < RSI_SHORT_MIN:
         return None   # Already oversold
 
+    # Condition 4: Momentum strength — avg candle body must be meaningful (not chop)
+    recent_candles = candles[-(MOMENTUM_BARS + 1):-1]
+    avg_body = 0.0
+    if recent_candles:
+        avg_body = sum(
+            abs(c["close"] - c["open"]) / c["open"]
+            for c in recent_candles if c["open"] > 0
+        ) / len(recent_candles)
+    if avg_body < MIN_CANDLE_BODY:
+        return None   # Candles too small — chop, skip
+
     # Signal confirmed
-    log(f"  ⚡ HF {symbol}: {direction} | EMA9={'↑' if ema_rising else '↓'} | RSI={rsi:.1f} | Price={current_price}")
+    log(f"  ⚡ HF {symbol}: {direction} | EMA9={'↑' if ema_rising else '↓'} | RSI={rsi:.1f} | Body={avg_body*100:.3f}% | Price={current_price}")
     return {
         "direction": direction,
         "price": current_price,
         "rsi": rsi,
+        "avg_body": avg_body,
     }
 
 # ═══════════════════════════════════════════════════════════════
