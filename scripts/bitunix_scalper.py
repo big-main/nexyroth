@@ -125,8 +125,9 @@ LEVERAGE        = 10
 MIN_BALANCE     = 2.0
 MAX_POSITIONS   = 2
 TP_RR_RATIO     = 3.0    # Take profit at 3:1 risk-reward
-FALLBACK_RISK   = 0.02   # 2% risk before Kelly activates
-MAX_RISK_CAP    = 0.05   # 5% max risk per trade (Kelly cap)
+FALLBACK_RISK   = 0.15   # 15% risk floor (small account — must meet min order sizes)
+MIN_KELLY_FLOOR = 0.15   # Never risk less than 15% regardless of Kelly output
+MAX_RISK_CAP    = 0.25   # 25% max risk per trade
 MIN_KELLY_TRADES = 10    # Min trades before Kelly activates
 
 # Candle settings
@@ -547,7 +548,7 @@ def load_trade_history() -> List[dict]:
 def save_trade_history(history: List[dict]):
     os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
     with open(HISTORY_FILE, "w") as f:
-        json.dump(history[-100:], f, indent=2)  # Keep last 100 trades
+        json.dump(history[-200:], f, indent=2)  # Keep last 200 trades
 
 def calc_kelly_fraction(history: List[dict]) -> float:
     """Calculate Kelly fraction from trade history."""
@@ -573,9 +574,9 @@ def calc_kelly_fraction(history: List[dict]) -> float:
     rr = avg_win / avg_loss
     kelly = win_rate - (1 - win_rate) / rr
 
-    # Half-Kelly for safety, capped
+    # Half-Kelly for safety, capped with minimum floor for small accounts
     half_kelly = kelly / 2.0
-    return max(FALLBACK_RISK, min(half_kelly, MAX_RISK_CAP))
+    return max(MIN_KELLY_FLOOR, min(half_kelly, MAX_RISK_CAP))
 
 # ═══════════════════════════════════════════════════════════════
 # CHANDELIER TRAILING STOP
@@ -729,7 +730,7 @@ def close_position(symbol: str, direction: str, exit_price: float, pos: dict, st
     else:
         pnl_pct = (entry - exit_price) / entry
 
-    pnl_usdt = pnl_pct * float(qty) * entry * LEVERAGE / LEVERAGE  # Simplified
+    pnl_usdt = pnl_pct * float(qty) * entry  # Notional PnL in USDT
 
     log(f"  💰 CLOSED {symbol} {direction}: entry={entry} exit={exit_price} PnL={pnl_pct*100:.2f}%")
 
