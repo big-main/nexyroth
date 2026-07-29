@@ -224,15 +224,28 @@ def get_klines(symbol: str, interval: str = "1m", limit: int = 30) -> List[dict]
     candles = []
     for k in data:
         try:
-            candles.append({
-                "open":   float(k[1]),
-                "high":   float(k[2]),
-                "low":    float(k[3]),
-                "close":  float(k[4]),
-                "volume": float(k[5]),
-            })
+            if isinstance(k, dict):
+                candles.append({
+                    "open":   float(k.get("open", 0)),
+                    "high":   float(k.get("high", 0)),
+                    "low":    float(k.get("low", 0)),
+                    "close":  float(k.get("close", 0)),
+                    "volume": float(k.get("quoteVol", k.get("baseVol", 0))),
+                    "time":   int(k.get("time", 0)),
+                })
+            else:
+                candles.append({
+                    "open":   float(k[1]),
+                    "high":   float(k[2]),
+                    "low":    float(k[3]),
+                    "close":  float(k[4]),
+                    "volume": float(k[5]),
+                    "time":   int(k[0]) if len(k) > 0 else 0,
+                })
         except Exception:
             continue
+    # Sort oldest → newest
+    candles.sort(key=lambda c: c.get("time", 0))
     return candles
 
 def get_balance() -> float:
