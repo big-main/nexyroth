@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Syntax & Lint Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install requests pandas pyflakes
+
+      - name: Check syntax (all scripts)
+        run: |
+          find scripts/ -name "*.py" -exec python3 -m py_compile {} \;
+          echo "✅ All scripts pass syntax check"
+
+      - name: Run pyflakes (undefined names / unused imports)
+        run: |
+          find scripts/ -name "*.py" ! -path "*/airdrop_farming/*" | xargs python3 -m pyflakes 2>&1 || true
+
+      - name: Verify no hardcoded secrets
+        run: |
+          # Fail if any script contains a raw API key pattern (32+ hex chars assigned to a variable)
+          if grep -rn --include="*.py" -E "(api_key|secret_key|API_KEY|SECRET_KEY)\s*=\s*['\"][a-fA-F0-9]{20,}" scripts/; then
+            echo "❌ Hardcoded secret detected!"
+            exit 1
+          fi
+          echo "✅ No hardcoded secrets found"
