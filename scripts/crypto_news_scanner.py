@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NEXYROTH Crypto News & X Scanner v1.0
+NEXYROTH Crypto News & X Scanner v1.1
 ══════════════════════════════════════
 Searches the web and X (Twitter) daily for breaking crypto news,
 easy-money opportunities, and actionable alerts.
@@ -11,7 +11,9 @@ Scans for:
   - Whale wallet moves (large transfers)
   - Regulatory catalysts (ETF approvals, policy changes)
   - Pump signals (trending tokens, volume spikes)
-  - Free money (staking rewards, yield farming, referral bonuses)
+  - Free money (staking rewards, yield farming, referral bonuses, bug bounties)
+  - Easy money (retroactive drops, testnet rewards, points programs, quests)
+  - Passive income (lending, liquidity mining, node rewards)
   - Major partnership/integration announcements
   - Liquidation cascades / funding rate extremes
 
@@ -60,22 +62,44 @@ CRYPTO_INFLUENCERS = {
 
 # Search queries for X
 X_SEARCH_QUERIES = [
+    # Airdrops & Free Tokens
     "crypto airdrop confirmed lang:en -is:retweet",
+    "airdrop eligible claim free tokens lang:en -is:retweet",
+    "retroactive airdrop snapshot lang:en -is:retweet",
+    "testnet incentive reward points program lang:en -is:retweet",
+    # Easy / Free Money
+    "free crypto earn no investment lang:en -is:retweet",
+    "referral bonus crypto free lang:en -is:retweet",
+    "bug bounty crypto reward lang:en -is:retweet",
+    "crypto quest mission reward lang:en -is:retweet",
+    "galxe zealy layer3 points reward lang:en -is:retweet",
+    # Listings & Launches
     "token launch listing binance coinbase lang:en -is:retweet",
+    "new token listing exchange lang:en -is:retweet",
+    # Whale & Market Moves
     "whale transfer million USDT lang:en -is:retweet",
+    # Regulatory & ETF
     "crypto ETF approved SEC lang:en -is:retweet",
-    "free crypto staking reward lang:en -is:retweet",
+    # Yield & Passive Income
+    "free crypto staking reward APY lang:en -is:retweet",
+    "liquidity mining yield farming free lang:en -is:retweet",
+    "node validator reward passive income crypto lang:en -is:retweet",
+    # Pumps & Momentum
     "solana memecoin pump 100x lang:en -is:retweet",
+    "altcoin breakout momentum lang:en -is:retweet",
 ]
 
 # Search queries for X News
 NEWS_QUERIES = [
-    "cryptocurrency airdrop",
-    "bitcoin ETF",
+    "cryptocurrency airdrop free tokens",
+    "bitcoin ETF approval",
     "crypto exchange listing",
-    "DeFi yield farming",
-    "solana ecosystem",
-    "crypto regulation",
+    "DeFi yield farming passive income",
+    "solana ecosystem airdrop",
+    "crypto regulation SEC",
+    "free crypto earn rewards",
+    "crypto bug bounty",
+    "retroactive airdrop eligibility",
 ]
 
 # ═══════════════════════════════════════════════════════════════
@@ -232,14 +256,28 @@ def classify_opportunity(text: str) -> Dict:
     text_lower = text.lower()
     
     categories = {
-        "airdrop": ["airdrop", "free tokens", "claim", "eligible", "snapshot", "distribution"],
-        "listing": ["listing", "listed on", "binance listing", "coinbase listing", "exchange listing"],
-        "whale_move": ["whale", "transferred", "million", "billion", "large transfer", "moved"],
-        "regulatory": ["etf", "sec", "approved", "regulation", "legal", "compliance"],
-        "pump_signal": ["pump", "moon", "100x", "1000x", "breakout", "parabolic", "ath"],
-        "yield": ["staking", "yield", "apy", "apr", "farming", "reward", "earn"],
-        "partnership": ["partnership", "integration", "collaboration", "backed by", "invested"],
-        "launch": ["launch", "mainnet", "testnet", "live", "deployed", "released"],
+        "airdrop": ["airdrop", "free tokens", "claim", "eligible", "snapshot", "distribution",
+                    "retroactive", "retroairdrop", "drop", "claimable", "tge airdrop"],
+        "free_money": ["free crypto", "free money", "easy money", "no investment", "zero cost",
+                       "referral bonus", "sign up bonus", "welcome bonus", "bug bounty",
+                       "bounty reward", "quest reward", "mission reward", "galxe", "zealy",
+                       "layer3", "crew3", "points program", "earn points", "testnet reward",
+                       "incentive program", "ambassador reward", "community reward"],
+        "listing": ["listing", "listed on", "binance listing", "coinbase listing", "exchange listing",
+                    "bybit listing", "okx listing", "kraken listing", "kucoin listing"],
+        "whale_move": ["whale", "transferred", "million", "billion", "large transfer", "moved",
+                       "wallet moved", "on-chain", "onchain"],
+        "regulatory": ["etf", "sec", "approved", "regulation", "legal", "compliance",
+                        "cftc", "senate", "congress", "bill passed"],
+        "pump_signal": ["pump", "moon", "100x", "1000x", "breakout", "parabolic", "ath",
+                        "all time high", "ripping", "flying", "exploding"],
+        "yield": ["staking", "yield", "apy", "apr", "farming", "reward", "earn",
+                  "liquidity mining", "passive income", "node reward", "validator reward",
+                  "lending reward", "interest rate"],
+        "partnership": ["partnership", "integration", "collaboration", "backed by", "invested",
+                         "strategic", "venture", "series a", "series b", "funding round"],
+        "launch": ["launch", "mainnet", "testnet", "live", "deployed", "released",
+                   "going live", "launching", "tge", "token generation", "idl", "ido"],
     }
     
     matched = []
@@ -250,13 +288,14 @@ def classify_opportunity(text: str) -> Dict:
     # Priority scoring
     priority_map = {
         "airdrop": 5,
+        "free_money": 5,   # Easy/free money = highest priority
         "listing": 4,
+        "regulatory": 4,
         "whale_move": 3,
         "pump_signal": 3,
-        "regulatory": 4,
+        "launch": 3,
         "yield": 2,
         "partnership": 2,
-        "launch": 3,
     }
     
     priority = max((priority_map.get(c, 1) for c in matched), default=1)
@@ -271,7 +310,7 @@ def classify_opportunity(text: str) -> Dict:
 # MAIN SCANNER
 # ═══════════════════════════════════════════════════════════════
 def main():
-    log("📰 Crypto News & X Scanner v1.0 | Starting scan...")
+    log("📰 Crypto News & X Scanner v1.1 | Starting scan...")
     
     client = get_api_client()
     if not client:
@@ -284,7 +323,7 @@ def main():
     log("  🔍 Searching X posts...")
     for query in X_SEARCH_QUERIES:
         posts = search_x_posts(client, query, "15")
-        for post in posts[:5]:  # Top 5 per query
+        for post in posts[:4]:  # Top 4 per query
             classification = classify_opportunity(post["text"])
             if classification["is_actionable"] or post["engagement"] > 50:
                 all_opportunities.append({
@@ -300,7 +339,7 @@ def main():
     # 2. Search X News
     log("  📰 Searching X News...")
     news_items = []
-    for query in NEWS_QUERIES[:3]:  # Top 3 news queries
+    for query in NEWS_QUERIES[:5]:  # Top 5 news queries
         stories = search_x_news(client, query)
         for story in stories:
             classification = classify_opportunity(story.get("summary", "") + " " + story.get("title", ""))
@@ -361,9 +400,9 @@ def main():
             msg += "🎯 <b>Actionable Opportunities:</b>\n\n"
             for i, opp in enumerate(actionable[:7], 1):
                 cats = ", ".join(opp.get("categories", []))
-                emoji_map = {"airdrop": "🪂", "listing": "📋", "whale_move": "🐋",
-                            "pump_signal": "🚀", "regulatory": "⚖️", "yield": "💰",
-                            "partnership": "🤝", "launch": "🎉"}
+                emoji_map = {"airdrop": "🪂", "free_money": "💵", "listing": "📋",
+                            "whale_move": "🐋", "pump_signal": "🚀", "regulatory": "⚖️",
+                            "yield": "💰", "partnership": "🤝", "launch": "🎉"}
                 emoji = emoji_map.get(opp.get("categories", [""])[0], "💡")
                 
                 text = opp.get("text", "")[:150]
